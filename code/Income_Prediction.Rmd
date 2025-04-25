@@ -1,1 +1,734 @@
+---
+title: "Combined Income Prediction Models Analysis"
+author: "Kashish Lalwani"
+date: "2025-04-20"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+rm(list = ls())
+```
+
+Data Preprocessing:
+
+```{r}
+library(dplyr)
+library(readr)
+
+# Read the dataset
+data <- read_csv("train.csv")
+
+# Display the structure of the dataset
+str(data)
+
+# Check for null values represented as "?"
+sapply(data, function(x) sum(x == "?"))
+
+# Preprocess the dataset:
+# 1. Remove rows with "?" values
+# 2. Drop specified columns: fnlwgt, education, capital-gain, capital-loss
+preprocessed_data <- data %>%
+  # Filter out rows with "?" values
+  filter(across(everything(), ~ . != "?")) %>%
+  # Drop the specified columns
+  select(-fnlwgt, -education, -`capital-gain`, -`capital-loss`)
+
+# Check the dimensions of the original and preprocessed datasets
+cat("Original dataset dimensions:", dim(data)[1], "rows x", dim(data)[2], "columns\n")
+cat("Preprocessed dataset dimensions:", dim(preprocessed_data)[1], "rows x", dim(preprocessed_data)[2], "columns\n")
+
+# Write the preprocessed data to a new CSV file
+write_csv(preprocessed_data, "train_preprocessed.csv")
+
+cat("Preprocessing complete. Output saved as 'train_preprocessed.csv'\n")
+```
+
+
+Logistic:
+
+
+```{r}
+# ========== 1. Load Required Libraries ==========
+required_packages <- c("glmnet", "caret", "pROC")
+installed <- required_packages %in% rownames(installed.packages())
+if (any(!installed)) install.packages(required_packages[!installed])
+lapply(required_packages, library, character.only = TRUE)
+```
+
+```{r}
+# ========== 2. Load Dataset ==========
+# Load training and test datasets
+train_data <- read.csv("train_preprocessed.csv")
+test_data <- read.csv("test_preprocessed.csv")
+```
+
+```{r}
+# ========== 3. Target Variable Preparation ==========
+# Convert last column (target) to binary numeric (0/1)
+y_train <- as.numeric(as.factor(train_data[, ncol(train_data)])) - 1
+y_test <- as.numeric(as.factor(test_data[, ncol(test_data)])) - 1
+
+# Check class distribution
+cat("Train Target Distribution:\n")
+print(table(y_train))
+cat("Test Target Distribution:\n")
+print(table(y_test))
+```
+
+
+```{r}
+# ========== 4. Preprocessing Numeric Features ==========
+# Identify numeric columns (excluding target)
+numeric_train <- sapply(train_data[, -ncol(train_data)], is.numeric)
+numeric_test <- sapply(test_data[, -ncol(test_data)], is.numeric)
+
+# Scale based on training data only
+train_numeric <- train_data[, -ncol(train_data)][, numeric_train]
+test_numeric <- test_data[, -ncol(test_data)][, numeric_test]
+
+train_mean <- apply(train_numeric, 2, mean)
+train_sd <- apply(train_numeric, 2, sd)
+
+x_train_scaled <- scale(train_numeric, center = train_mean, scale = train_sd)
+#Test set is scaled using train set parameters to avoid data leakage
+x_test_scaled <- scale(test_numeric, center = train_mean, scale = train_sd)  
+
+
+# Prepare data frames and matrices
+train_scaled_df <- as.data.frame(x_train_scaled)
+train_scaled_df$target <- y_train
+
+test_scaled_df <- as.data.frame(x_test_scaled)
+test_scaled_df$target <- y_test
+
+x_train <- as.matrix(x_train_scaled)
+x_test <- as.matrix(x_test_scaled)
+```
+
+
+```{r}
+# ========== 5. Ordinary Logistic Regression ==========
+cat("\n🔹 Ordinary Logistic Regression\n")
+logit_model <- glm(target ~ ., data = train_scaled_df, family = "binomial", control = list(maxit = 100))
+
+# Predict probabilities and classes
+logit_probs <- predict(logit_model, newdata = test_scaled_df, type = "response")
+logit_preds <- ifelse(logit_probs > 0.5, 1, 0)
+
+# Confusion Matrix and AUC
+conf_logit <- confusionMatrix(factor(logit_preds), factor(y_test))
+roc_logit <- roc(y_test, logit_probs)
+
+print(conf_logit)
+cat("AUC:", auc(roc_logit), "\n")
+plot(roc_logit, main = "ROC Curve - Ordinary Logistic Regression", col = "blue", lwd = 2)
+
+```
+```{r}
+ # ========== 6. Ridge Logistic Regression (L2) ==========
+cat("\n🔹 Ridge Logistic Regression\n")
+ridge_model <- cv.glmnet(x_train, y_train, alpha = 0, family = "binomial")
+best_lambda_ridge <- ridge_model$lambda.min
+
+# Predict and evaluate
+ridge_probs <- predict(ridge_model, s = best_lambda_ridge, newx = x_test, type = "response")
+ridge_preds <- ifelse(ridge_probs > 0.5, 1, 0)
+
+conf_ridge <- confusionMatrix(factor(ridge_preds), factor(y_test))
+roc_ridge <- roc(y_test, as.vector(ridge_probs))
+
+print(conf_ridge)
+cat("AUC:", auc(roc_ridge), "\n")
+plot(roc_ridge, main = "ROC Curve - Ridge Logistic Regression", col = "red", lwd = 2)
+
+
+```
+```{r}
+ # ========== 7. Lasso Logistic Regression (L1) ==========
+cat("\n🔹 Lasso Logistic Regression\n")
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1, family = "binomial")
+best_lambda_lasso <- lasso_model$lambda.min
+
+# Predict and evaluate
+lasso_probs <- predict(lasso_model, s = best_lambda_lasso, newx = x_test, type = "response")
+lasso_preds <- ifelse(lasso_probs > 0.5, 1, 0)
+
+conf_lasso <- confusionMatrix(factor(lasso_preds), factor(y_test))
+roc_lasso <- roc(y_test, as.vector(lasso_probs))
+
+print(conf_lasso)
+cat("AUC:", auc(roc_lasso), "\n")
+plot(roc_lasso, main = "ROC Curve - Lasso Logistic Regression", col = "green", lwd = 2)
+
+```
+
+```{r}
+# ========== 8. Compare Models ==========
+cat("\n📊 Summary of Model AUCs:\n")
+cat(sprintf("Ordinary Logistic Regression: %.3f\n", auc(roc_logit)))
+cat(sprintf("Ridge Logistic Regression:    %.3f\n", auc(roc_ridge)))
+cat(sprintf("Lasso Logistic Regression:    %.3f\n", auc(roc_lasso)))
+```
+
+
+SVM:
+
+```{r}
+# Completely Standalone SVM Implementation
+# This script is independent of any neural network components
+
+# Clear environment to avoid any conflicts
+# rm(list = ls())
+# 
+# Load required libraries
+suppressPackageStartupMessages({
+  library(e1071)     # For SVM model
+  library(caret)     # For data preprocessing and evaluation metrics
+  library(ROCR)      # For ROC curves
+  library(ggplot2)   # For plotting
+})
+
+# ====== DATA LOADING AND PREP =======
+
+# Read the preprocessed data
+cat("Reading data...\n")
+train_data <- tryCatch({
+  read.csv("train_preprocessed.csv")
+}, error = function(e) {
+  cat("Error reading train_preprocessed.csv:", conditionMessage(e), "\n")
+  cat("Please make sure the file exists in the working directory.\n")
+  stop("Failed to read training data")
+})
+
+test_data <- tryCatch({
+  read.csv("test_preprocessed.csv")
+}, error = function(e) {
+  cat("Error reading test_preprocessed.csv:", conditionMessage(e), "\n")
+  cat("Please make sure the file exists in the working directory.\n")
+  stop("Failed to read test data")
+})
+
+# Print data dimensions
+cat("Training data dimensions:", dim(train_data)[1], "rows,", dim(train_data)[2], "columns\n")
+cat("Testing data dimensions:", dim(test_data)[1], "rows,", dim(test_data)[2], "columns\n")
+
+# Fix column names (replace hyphens with dots)
+names(train_data) <- gsub("-", ".", names(train_data))
+names(test_data) <- gsub("-", ".", names(test_data))
+
+# ====== CREATE SIMPLIFIED DATASETS =======
+
+# Create binary income variable
+# First try to identify which income column exists
+if("income" %in% names(train_data)) {
+  target_col <- "income"
+} else {
+  # Try to find a column name containing "income"
+  potential_cols <- grep("income", names(train_data), ignore.case = TRUE, value = TRUE)
+  if(length(potential_cols) > 0) {
+    target_col <- potential_cols[1]
+  } else {
+    # If no income column found, try the last column as a fallback
+    target_col <- names(train_data)[ncol(train_data)]
+    cat("WARNING: No income column found. Using last column:", target_col, "\n")
+  }
+}
+
+# Create binary target variable
+cat("Using", target_col, "as target variable\n")
+train_data$income_binary <- factor(ifelse(train_data[[target_col]] == ">50K", 1, 0))
+test_data$income_binary <- factor(ifelse(test_data[[target_col]] == ">50K", 1, 0))
+
+# Select numeric features for simplicity (avoid categorical variable issues)
+numeric_vars <- sapply(train_data, is.numeric)
+numeric_cols <- names(train_data)[numeric_vars]
+
+# Ensure we have some numeric columns
+if(length(numeric_cols) < 2) {
+  cat("Warning: Very few numeric columns found. Adding basic variables.\n")
+  # Try to add essential variables we expect to be numeric
+  essential_vars <- c("age", "education.num", "hours.per.week")
+  for(var in essential_vars) {
+    if(var %in% names(train_data) && !var %in% numeric_cols) {
+      train_data[[var]] <- as.numeric(as.character(train_data[[var]]))
+      test_data[[var]] <- as.numeric(as.character(test_data[[var]]))
+      numeric_cols <- c(numeric_cols, var)
+    }
+  }
+}
+
+cat("Using numeric features:", paste(numeric_cols, collapse=", "), "\n")
+
+# Create simplified dataframes with only numeric features and target
+train_simple <- train_data[, c(numeric_cols, "income_binary")]
+test_simple <- test_data[, c(numeric_cols, "income_binary")]
+
+# Remove NA values
+train_simple <- na.omit(train_simple)
+test_simple <- na.omit(test_simple)
+
+# ====== TRAIN SVM MODEL =======
+
+# Use a smaller sample for faster training
+set.seed(12345)
+sample_size <- min(3000, nrow(train_simple))
+train_indices <- createDataPartition(train_simple$income_binary, p = sample_size/nrow(train_simple), list = FALSE)
+train_sample <- train_simple[train_indices, ]
+
+cat("\nTraining SVM model with", nrow(train_sample), "samples...\n")
+
+# Try to train SVM model with probability estimation
+svm_model <- tryCatch({
+  svm(
+    income_binary ~ .,
+    data = train_sample,
+    kernel = "radial",
+    probability = TRUE
+  )
+}, error = function(e) {
+  cat("Error with radial kernel:", conditionMessage(e), "\n")
+  
+  # Fallback to linear kernel
+  cat("Trying linear kernel instead...\n")
+  tryCatch({
+    svm(
+      income_binary ~ .,
+      data = train_sample,
+      kernel = "linear",
+      probability = TRUE
+    )
+  }, error = function(e2) {
+    cat("Error with linear kernel:", conditionMessage(e2), "\n")
+    
+    # Last resort: simplest model
+    cat("Using simplest model without probability...\n")
+    svm(
+      income_binary ~ .,
+      data = train_sample,
+      kernel = "linear",
+      probability = FALSE
+    )
+  })
+})
+
+# ====== EVALUATE MODEL =======
+
+cat("\nGenerating predictions...\n")
+
+# Generate predictions
+predictions <- predict(svm_model, test_simple)
+
+# Create confusion matrix
+conf_matrix <- table(Predicted = predictions, Actual = test_simple$income_binary)
+
+# Calculate metrics
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+if("1" %in% rownames(conf_matrix) && "1" %in% colnames(conf_matrix)) {
+  sensitivity <- conf_matrix["1", "1"] / sum(conf_matrix[, "1"])
+} else {
+  sensitivity <- NA
+}
+if("0" %in% rownames(conf_matrix) && "0" %in% colnames(conf_matrix)) {
+  specificity <- conf_matrix["0", "0"] / sum(conf_matrix[, "0"])
+} else {
+  specificity <- NA
+}
+
+# Display results
+cat("\n======================================\n")
+cat("SVM MODEL EVALUATION RESULTS:\n")
+cat("\nConfusion Matrix:\n")
+print(conf_matrix)
+cat("\nAccuracy:", round(accuracy, 4))
+cat("\nSensitivity (True Positive Rate):", round(sensitivity, 4))
+cat("\nSpecificity (True Negative Rate):", round(specificity, 4))
+cat("\n======================================\n")
+
+# ====== CREATE ROC CURVE =======
+
+# Try to get probability predictions for ROC curve
+roc_success <- FALSE
+tryCatch({
+  # Check if probability = TRUE was successful
+  has_probability <- "probabilities" %in% names(attributes(predict(svm_model, test_simple[1:5,], probability = TRUE)))
+  
+  if(has_probability) {
+    # Get probability predictions
+    prob_predictions <- attr(predict(svm_model, test_simple, probability = TRUE), "probabilities")[, "1"]
+    
+    # Create ROC curve
+    pred_obj <- prediction(prob_predictions, test_simple$income_binary)
+    perf_obj <- performance(pred_obj, "tpr", "fpr")
+    auc <- performance(pred_obj, "auc")@y.values[[1]]
+    
+    cat("Area Under the ROC Curve (AUC):", round(auc, 4), "\n")
+    
+    # Plot ROC curve
+    pdf("svm_roc_curve.pdf")
+    plot(perf_obj, 
+         main = "ROC Curve for SVM Income Prediction", 
+         col = "blue", 
+         lwd = 2)
+    abline(0, 1, lty = 2, col = "gray")
+    legend("bottomright", 
+           legend = paste("AUC =", round(auc, 4)), 
+           col = "blue", 
+           lwd = 2)
+    dev.off()
+    
+    # Create ggplot version
+    roc_data <- data.frame(
+      FPR = perf_obj@x.values[[1]],  # False Positive Rate
+      TPR = perf_obj@y.values[[1]]   # True Positive Rate
+    )
+    
+    roc_plot <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
+      geom_line(color = "blue", size = 1) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+      annotate("text", x = 0.75, y = 0.25, 
+               label = paste("AUC =", round(auc, 4)), 
+               size = 5, color = "darkblue") +
+      labs(
+        title = "ROC Curve for SVM Income Prediction",
+        x = "False Positive Rate (1 - Specificity)",
+        y = "True Positive Rate (Sensitivity)"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10)
+      )
+    
+    # Save the ggplot version
+    ggsave("svm_roc_curve_ggplot.pdf", roc_plot, width = 8, height = 6)
+    ggsave("svm_roc_curve_ggplot.png", roc_plot, width = 8, height = 6)
+    
+    # Save results with AUC
+    svm_results <- list(
+      accuracy = accuracy,
+      sensitivity = sensitivity,
+      specificity = specificity,
+      auc = auc,
+      confusion_matrix = conf_matrix,
+      roc_data = roc_data
+    )
+    
+    cat("ROC curve files created: svm_roc_curve.pdf, svm_roc_curve_ggplot.pdf/png\n")
+    roc_success <- TRUE
+  } else {
+    cat("Model doesn't support probability estimates. Cannot create ROC curve.\n")
+  }
+}, error = function(e) {
+  cat("Could not generate ROC curve:", conditionMessage(e), "\n")
+})
+
+# If ROC curve generation failed, save results without AUC
+if(!roc_success) {
+  svm_results <- list(
+    accuracy = accuracy,
+    sensitivity = sensitivity,
+    specificity = specificity,
+    confusion_matrix = conf_matrix
+  )
+}
+
+# Save results and model
+saveRDS(svm_results, "svm_income_prediction_results.rds")
+saveRDS(svm_model, "svm_income_prediction_model.rds")
+
+cat("\nResults saved to 'svm_income_prediction_results.rds'\n")
+cat("Model saved to 'svm_income_prediction_model.rds'\n")
+cat("\nDone!\n")
+```
+
+Random Forest Model
+
+```{r}
+# Set seed
+set.seed(123)
+
+# Load packages
+library(randomForest)
+library(caret)
+
+# 1. Load original datasets
+train_original <- read.csv("train_preprocessed.csv", stringsAsFactors = FALSE)
+test_original  <- read.csv("test_preprocessed.csv", stringsAsFactors = FALSE)
+
+# 2. Copy to RF-specific versions
+train_rf <- train_original
+test_rf  <- test_original
+
+# 3. Convert character columns to factors
+factor_vars <- c("workclass", "marital.status", "occupation", 
+                 "relationship", "race", "sex", "native.country")
+
+train_rf[factor_vars] <- lapply(train_rf[factor_vars], factor)
+
+# Match factor levels in test to those in train
+for (var in factor_vars) {
+  test_rf[[var]] <- factor(test_rf[[var]], levels = levels(train_rf[[var]]))
+}
+
+# Also make sure the target variable is factor with same levels
+train_rf$income <- factor(train_rf$income)
+test_rf$income  <- factor(test_rf$income, levels = levels(train_rf$income))
+
+# 4. Train Random Forest model
+rf_model <- randomForest(income ~ ., data = train_rf, ntree = 100, importance = TRUE)
+
+# 5. Predict on test set
+rf_pred <- predict(rf_model, newdata = test_rf)
+
+# 6. Evaluate with confusion matrix
+confusion_result <- confusionMatrix(data = rf_pred, reference = test_rf$income)
+
+# 7. Output results
+print(confusion_result)
+```
+
+
+XGBoost model
+
+```{r}
+# Set seed
+set.seed(123)
+
+# Load required libraries
+library(xgboost)
+library(caret)
+
+# 1. Load preprocessed CSV files
+train_original <- read.csv("train_preprocessed.csv", stringsAsFactors = FALSE)
+test_original  <- read.csv("test_preprocessed.csv", stringsAsFactors = FALSE)
+
+# 2. Trim whitespace from income column
+train_original$income <- trimws(train_original$income)
+test_original$income  <- trimws(test_original$income)
+
+# 3. Create binary income label (1 = >50K, 0 = <=50K)
+train_original$income_bin <- ifelse(train_original$income == ">50K", 1, 0)
+test_original$income_bin  <- ifelse(test_original$income == ">50K", 1, 0)
+
+# 4. Copy datasets to XGBoost-specific versions
+train_xgb <- train_original
+test_xgb  <- test_original
+
+# 5. Create one-hot encoded design matrices
+formula <- income_bin ~ . - income
+x_train <- model.matrix(formula, data = train_xgb)[, -1]
+x_test_raw <- model.matrix(formula, data = test_xgb)[, -1]
+
+# 6. Align test matrix columns with train matrix
+train_cols <- colnames(x_train)
+test_cols  <- colnames(x_test_raw)
+
+# Add missing columns to test that exist in train
+missing_cols <- setdiff(train_cols, test_cols)
+for (col in missing_cols) {
+  x_test_raw <- cbind(x_test_raw, setNames(data.frame(rep(0, nrow(x_test_raw))), col))
+}
+
+# Remove extra columns from test that do not exist in train
+x_test_raw <- x_test_raw[, colnames(x_test_raw) %in% train_cols, drop = FALSE]
+
+# Reorder columns in test to match the train matrix
+x_test <- x_test_raw[, train_cols, drop = FALSE]
+
+# Ensure both matrices are of type matrix
+x_train <- as.matrix(x_train)
+x_test  <- as.matrix(x_test)
+
+# 7. Create label vectors
+y_train <- train_xgb$income_bin
+y_test  <- test_xgb$income_bin
+
+# 8. Convert to DMatrix format
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dtest  <- xgb.DMatrix(data = x_test, label = y_test)
+
+# 9. Define XGBoost parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "error",
+  tree_method = "hist"
+)
+
+# 10. Train XGBoost model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100,
+  watchlist = list(train = dtrain),
+  verbose = 0
+)
+
+# 11. Generate predictions
+pred_prob <- predict(xgb_model, newdata = dtest)
+pred_label <- ifelse(pred_prob > 0.5, 1, 0)
+
+# 12. Evaluate model using confusion matrix
+confusion_result_xgb <- confusionMatrix(
+  factor(pred_label, levels = c(0, 1)),
+  factor(y_test, levels = c(0, 1)),
+  positive = "1"
+)
+
+# 13. Print evaluation results
+print(confusion_result_xgb)
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Load required libraries
+library(caret)
+library(xgboost)
+
+# 1. Load preprocessed data
+train_raw <- read.csv("train_preprocessed.csv", stringsAsFactors = FALSE)
+test_raw  <- read.csv("test_preprocessed.csv", stringsAsFactors = FALSE)
+
+# 2. Clean whitespace in income
+train_raw$income <- trimws(train_raw$income)
+test_raw$income  <- trimws(test_raw$income)
+
+# 3. Binary target encoding
+train_raw$income_bin <- ifelse(train_raw$income == ">50K", 1, 0)
+test_raw$income_bin  <- ifelse(test_raw$income == ">50K", 1, 0)
+
+# 4. Remove original income column
+train_caret <- subset(train_raw, select = -income)
+test_caret  <- subset(test_raw, select = -income)
+
+# 5. Convert income_bin to factor (caret requires classification targets as factor)
+train_caret$income_bin <- as.factor(train_caret$income_bin)
+test_caret$income_bin  <- as.factor(test_caret$income_bin)
+
+# 6. Train control: 5-fold cross-validation
+train_ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  allowParallel = TRUE
+)
+
+# 7. Convert target from 0/1 to strings (caret prefers character labels for classification metrics)
+train_caret$income_bin <- ifelse(train_caret$income_bin == "1", "High", "Low")
+test_caret$income_bin  <- ifelse(test_caret$income_bin == "1", "High", "Low")
+train_caret$income_bin <- as.factor(train_caret$income_bin)
+test_caret$income_bin  <- as.factor(test_caret$income_bin)
+
+# 8. Train the XGBoost model using caret
+xgb_caret_model <- train(
+  income_bin ~ .,
+  data = train_caret,
+  method = "xgbTree",
+  trControl = train_ctrl,
+  metric = "ROC",  # Use AUC as evaluation
+  tuneLength = 5,  # Number of hyperparameter combinations to try
+  verbose = FALSE
+)
+
+# 9. Predict on test data
+xgb_caret_pred <- predict(xgb_caret_model, newdata = test_caret)
+confusion <- confusionMatrix(xgb_caret_pred, test_caret$income_bin, positive = "High")
+
+# 10. Output evaluation results
+print(xgb_caret_model)
+print(confusion)
+```
+
+```{r}
+# Load Package
+library(pROC)
+
+# 1. Answer
+y_test_binary <- ifelse(test_rf$income == ">50K", 1, 0)
+
+# 2. Predict Probability
+# Random Forest
+rf_prob <- predict(rf_model, newdata = test_rf, type = "prob")[, ">50K"]
+
+# XGBoost (xgb.train)
+xgb_prob <- predict(xgb_model, newdata = xgb.DMatrix(data = x_test))
+
+# XGBoost (caret)
+xgb_caret_prob <- predict(xgb_caret_model, newdata = test_caret, type = "prob")[, "High"]
+
+# 3. Create ROC
+roc_rf         <- roc(y_test_binary, rf_prob)
+roc_xgb        <- roc(test_xgb$income_bin, xgb_prob)
+roc_xgb_caret  <- roc(test_caret$income_bin, xgb_caret_prob)
+
+# 4. Plot ROC Curve
+plot(roc_rf, col = "blue", lwd = 2, main = "ROC Curve: RF vs XGB vs XGB_caret")
+lines(roc_xgb, col = "darkorange", lwd = 2)
+lines(roc_xgb_caret, col = "forestgreen", lwd = 2)
+
+legend("bottomright",
+       legend = c(
+         paste0("Random Forest AUC: ", round(auc(roc_rf), 4)),
+         paste0("XGBoost (xgb.train) AUC: ", round(auc(roc_xgb), 4)),
+         paste0("XGBoost (caret) AUC: ", round(auc(roc_xgb_caret), 4))
+       ),
+       col = c("blue", "darkorange", "forestgreen"),
+       lwd = 2)
+```
+
+All results:
+
+```{r}
+cat("====================LOGISTIC MODEL EVALUATION RESULTS====================\n")
+cat("\n")
+cat("Ordinary Logistic\n")
+print(conf_logit)
+cat("AUC:", auc(roc_logit), "\n")
+cat("\n")
+cat("Ridge Logistic\n")
+print(conf_ridge)
+cat("AUC:", auc(roc_ridge), "\n")
+cat("\n")
+cat("Lasso Logistic\n")
+print(conf_lasso)
+cat("AUC:", auc(roc_lasso), "\n")
+cat("\n")
+
+cat("====================SVM MODEL EVALUATION RESULTS====================\n")
+cat("\nConfusion Matrix:\n")
+print(conf_matrix)
+cat("\nAccuracy:", round(accuracy, 4))
+cat("\nSensitivity (True Positive Rate):", round(sensitivity, 4))
+cat("\nSpecificity (True Negative Rate):", round(specificity, 4))
+
+cat("\n")
+cat("====================RANDOM FOREST MODEL EVALUATION RESULTS====================\n")
+print(confusion_result)
+
+cat("\n")
+cat("====================XGBOOST MODEL EVALUATION RESULTS====================\n")
+print(confusion_result_xgb)
+
+cat("\n")
+cat("====================XGBOOST CARET MODEL EVALUATION RESULTS====================\n")
+print(confusion)
+```
+
+
 
